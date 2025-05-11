@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up mingw-w64
+        run: |
+          brew install mingw-w64
+          
+      - name: Build all packages
+        run: |
+          chmod +x scripts/build-all.sh
+          ./scripts/build-all.sh
+          
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.REPO_GITHUB_TOKEN }}
+          files: |
+            dist/mpc-protocol-windows-exe.zip
+            dist/mpc-protocol-windows-powershell.zip
+            dist/mpc-protocol-windows-bat.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## MPC Protocol Handler ${{ github.ref_name }}
+            
+            ### Downloads
+            - Windows EXE version: [mpc-protocol-windows-exe.zip](mpc-protocol-windows-exe.zip)
+            - Windows PowerShell version: [mpc-protocol-windows-powershell.zip](mpc-protocol-windows-powershell.zip)
+            - Windows Batch version: [mpc-protocol-windows-bat.zip](mpc-protocol-windows-bat.zip)
+            
+            ### Installation
+            Please refer to the README.md in each package for installation instructions.
