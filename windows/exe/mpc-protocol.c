@@ -7,13 +7,12 @@
 #include <time.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <wchar.h>
 #include <stdlib.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
-#define WEBLINK_PREFIX L"mpc-hc://weblink?url="
 #define LOG_FILE L"mpc-hc-protocol.log"
-#define MAX_URL 2048
 
 // Global variable: indicates whether the console was successfully attached
 BOOL g_has_console = FALSE;
@@ -40,29 +39,34 @@ void log_message(const wchar_t* format, ...) {
     wchar_t timestamp[64];
     wchar_t message[4096];
     time_t now;
-    struct tm* tm_info;
+    struct tm tm_info;
     va_list args;
-    
-    time(&now);
-    tm_info = localtime(&now);
-    wcsftime(timestamp, sizeof(timestamp)/sizeof(wchar_t), L"%Y-%m-%d %H:%M:%S", tm_info);
-    
+
+    if (time(&now) == (time_t)-1 ||
+        localtime_s(&tm_info, &now) != 0 ||
+        wcsftime(timestamp, ARRAY_SIZE(timestamp), L"%Y-%m-%d %H:%M:%S", &tm_info) == 0) {
+        return;
+    }
+
     va_start(args, format);
-    _vsnwprintf(message, sizeof(message)/sizeof(wchar_t), format, args);
+    _vsnwprintf_s(message, ARRAY_SIZE(message), _TRUNCATE, format, args);
     va_end(args);
-    
+
     // Write log to temp directory
     wchar_t log_path[MAX_PATH];
-    GetTempPathW(MAX_PATH, log_path);
-    wcscat(log_path, LOG_FILE);
-    
-    FILE* f = _wfopen(log_path, L"a");
-    if (f) {
-        // Note: %ls ensures wide characters are not truncated as single-byte
-        fwprintf(f, L"[%ls] %ls\n", timestamp, message);
-        fclose(f);
+    DWORD temp_length = GetTempPathW(ARRAY_SIZE(log_path), log_path);
+    if (temp_length > 0 && temp_length < ARRAY_SIZE(log_path) &&
+        temp_length <= ARRAY_SIZE(log_path) - ARRAY_SIZE(LOG_FILE)) {
+        memcpy(log_path + temp_length, LOG_FILE, ARRAY_SIZE(LOG_FILE) * sizeof(*log_path));
+
+        FILE* f = _wfopen(log_path, L"a");
+        if (f) {
+            // Note: %ls ensures wide characters are not truncated as single-byte
+            fwprintf(f, L"[%ls] %ls\n", timestamp, message);
+            fclose(f);
+        }
     }
-    
+
     // If console was attached, output log directly to the terminal
     if (g_has_console) {
         wprintf(L"[%ls] %ls\n", timestamp, message);
@@ -72,9 +76,19 @@ void log_message(const wchar_t* format, ...) {
 
 // URL decoding
 wchar_t* decode_url(const wchar_t* encoded_url) {
-    wchar_t* decoded = (wchar_t*)calloc(MAX_URL, sizeof(wchar_t));
-    DWORD decoded_length = MAX_URL;
-    
+    if (!encoded_url) {
+        return NULL;
+    }
+
+    size_t encoded_length = wcslen(encoded_url);
+    if (encoded_length >= UINT32_MAX) {
+        log_message(L"Error: URL is too long to decode");
+        return NULL;
+    }
+
+    DWORD decoded_length = (DWORD)encoded_length + 1;
+    wchar_t* decoded = (wchar_t*)calloc(decoded_length, sizeof(*decoded));
+
     if (!decoded) {
         log_message(L"Error: Failed to allocate memory for URL decoding");
         return NULL;
@@ -93,25 +107,87 @@ wchar_t* decode_url(const wchar_t* encoded_url) {
 
 // Fix broken http// or https// format caused by Chrome 130+ stripping slashes
 wchar_t* fix_broken_url(wchar_t* url) {
+    const wchar_t* protocol = NULL;
+    const wchar_t* remainder = NULL;
+
+    if (!url) {
+        return NULL;
+    }
+
     log_message(L"Fixing URL: %ls", url);
-    
+
     if (wcsncmp(url, L"http//", 6) == 0) {
         log_message(L"Found broken http URL format");
-        // Insert ":" into the original string
-        size_t len = wcslen(url);
-        memmove(url + 6, url + 5, (len - 5 + 1) * sizeof(wchar_t));  // +1 includes null terminator
-        url[4] = L':';
-        log_message(L"Fixed http URL: %ls", url);
-    }
-    else if (wcsncmp(url, L"https//", 7) == 0) {
+        protocol = L"http://";
+        remainder = url + 6;
+    } else if (wcsncmp(url, L"https//", 7) == 0) {
         log_message(L"Found broken https URL format");
-        // Insert ":" into the original string
-        size_t len = wcslen(url);
-        memmove(url + 7, url + 6, (len - 6 + 1) * sizeof(wchar_t));  // +1 includes null terminator
-        url[5] = L':';
-        log_message(L"Fixed https URL: %ls", url);
+        protocol = L"https://";
+        remainder = url + 7;
     }
-    return url;
+
+    if (!protocol) {
+        return url;
+    }
+
+    size_t protocol_length = wcslen(protocol);
+    size_t remainder_length = wcslen(remainder);
+    if (remainder_length > (SIZE_MAX / sizeof(wchar_t)) - protocol_length - 1) {
+        log_message(L"Error: URL is too long to repair");
+        free(url);
+        return NULL;
+    }
+
+    wchar_t* fixed = (wchar_t*)malloc((protocol_length + remainder_length + 1) * sizeof(*fixed));
+    if (!fixed) {
+        log_message(L"Error: Memory allocation failed while fixing URL");
+        free(url);
+        return NULL;
+    }
+
+    memcpy(fixed, protocol, protocol_length * sizeof(*fixed));
+    memcpy(fixed + protocol_length, remainder, (remainder_length + 1) * sizeof(*fixed));
+    free(url);
+
+    log_message(L"Fixed URL: %ls", fixed);
+    return fixed;
+}
+
+wchar_t* escape_url_spaces(const wchar_t* url) {
+    if (!url) {
+        return NULL;
+    }
+
+    size_t length = wcslen(url);
+    size_t space_count = 0;
+    for (const wchar_t* p = url; *p; p++) {
+        if (*p == L' ') {
+            space_count++;
+        }
+    }
+
+    if (space_count > (SIZE_MAX - length - 1) / 2) {
+        return NULL;
+    }
+
+    wchar_t* escaped = (wchar_t*)malloc((length + (space_count * 2) + 1) * sizeof(*escaped));
+    if (!escaped) {
+        return NULL;
+    }
+
+    wchar_t* destination = escaped;
+    for (const wchar_t* source = url; *source; source++) {
+        if (*source == L' ') {
+            *destination++ = L'%';
+            *destination++ = L'2';
+            *destination++ = L'0';
+        } else {
+            *destination++ = *source;
+        }
+    }
+    *destination = L'\0';
+
+    return escaped;
 }
 
 // Check if URL is valid
@@ -120,6 +196,10 @@ BOOL is_valid_url(const wchar_t* url) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
+    UNREFERENCED_PARAMETER(hInstance);
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
     // Initialize console attachment logic
     init_console();
     
@@ -140,16 +220,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         }
     }
 
-    wchar_t* url = _wcsdup(pCmdLine);
-    wchar_t* final_url = NULL;
-
-    // 1. Remove mpc-hc:// protocol prefix (length 9)
-    if (wcsncmp(url, L"mpc-hc://", 9) == 0) {
-        wcscpy(url, url + 9);
-        log_message(L"Removed mpc-hc:// prefix: %ls", url);
+    const wchar_t* url_start = pCmdLine;
+    if (wcsncmp(url_start, L"mpc-hc://", 9) == 0) {
+        url_start += 9;
+        log_message(L"Removed mpc-hc:// prefix: %ls", url_start);
     }
 
-    // 2. Parse weblink format (detect weblink?url= or weblink/?url=)
+    wchar_t* url = _wcsdup(url_start);
+    if (!url) {
+        log_message(L"Error: Memory allocation failed");
+        return 1;
+    }
+    wchar_t* final_url = NULL;
+
+    // 1. Parse weblink format (detect weblink?url= or weblink/?url=)
     if (wcsncmp(url, L"weblink?url=", 11) == 0 || wcsncmp(url, L"weblink/?url=", 12) == 0) {
         wchar_t* weblink_url = wcsstr(url, L"url=");
         if (weblink_url) {
@@ -173,8 +257,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         }
         free(url);
     } else {
-        // 3. Handle standard format and Chrome 130+ broken format (directly call fix function)
+        // 2. Handle standard format and Chrome 130+ broken format
         final_url = fix_broken_url(url);
+    }
+
+    if (!final_url) {
+        return 1;
     }
 
     // Validate URL
@@ -184,9 +272,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         return 1;
     }
 
-    // Encode spaces as +
-    for (wchar_t* p = final_url; *p; p++) {
-        if (*p == L' ') *p = L'+';
+    wchar_t* escaped_url = escape_url_spaces(final_url);
+    free(final_url);
+    final_url = escaped_url;
+    if (!final_url) {
+        log_message(L"Error: Failed to escape URL");
+        return 1;
     }
 
     // 4. Locate MPC-HC (directly look for mpc-hc64.exe or mpc-hc.exe in the same directory)
@@ -223,12 +314,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     log_message(L"Arguments: %ls", args);
 
     // Launch MPC-HC to start playback
-    int ret = (INT_PTR)ShellExecute(NULL, NULL, mpc_path, args, NULL, SW_SHOWNORMAL);
+    INT_PTR ret = (INT_PTR)ShellExecuteW(NULL, NULL, mpc_path, args, NULL, SW_SHOWNORMAL);
     if (ret <= 32) {
-        log_message(L"Error: Failed to start MPC-HC (error code: %d)", ret);
+        log_message(L"Error: Failed to start MPC-HC (error code: %lld)", (long long)ret);
         free(args);
         free(final_url);
-        return ret;
+        return (int)ret;
     }
 
     log_message(L"MPC-HC started successfully");

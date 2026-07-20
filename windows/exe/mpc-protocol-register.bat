@@ -1,4 +1,5 @@
 @echo off
+setlocal
 @echo.
 
 if not exist "%~dp0mpc-protocol.exe" (
@@ -30,10 +31,21 @@ echo then you need to right click and use "Run as Administrator".
 echo Associating mpc-hc:// with mpc-protocol.exe...
 
 reg add HKCR\mpc-hc /ve /t REG_SZ /d "URL:mpc-hc Protocol" /f
+if errorlevel 1 goto :error
 reg add HKCR\mpc-hc /v "URL Protocol" /t REG_SZ /d "" /f
+if errorlevel 1 goto :error
 reg add HKCR\mpc-hc\DefaultIcon /ve /t REG_SZ /d "%~dp0%MPC_EXE%,0" /f
+if errorlevel 1 goto :error
 reg add HKCR\mpc-hc\shell\open\command /ve /t REG_SZ /d "\"%~dp0mpc-protocol.exe\" \"%%1\"" /f
+if errorlevel 1 goto :error
 
 @echo.
 echo MPC-HC protocol registration completed successfully!
 pause
+exit /b 0
+
+:error
+echo.
+echo Error: Failed to register the MPC-HC protocol. Run this script as Administrator.
+pause
+exit /b 1
