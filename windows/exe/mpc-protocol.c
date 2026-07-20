@@ -5,6 +5,7 @@
 #include <shlwapi.h>
 #include <wininet.h>
 #include <time.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <stdlib.h>
